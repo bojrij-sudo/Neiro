@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.venv/
+env/
+
+# Данные и модели
+data/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Логи и результаты
+logs/
+runs/
+wandb/
+*.log
+
+# IDE и ОС
+.idea/
+.vscode/
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
