@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Нейросеть для MNIST — прямо в браузере</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<style>
+  :root { --accent: #5b8def; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: #f5f6f8; color: #222; margin: 0; padding: 24px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 26px; }
+  .card {
+    background: #fff; border-radius: 12px; padding: 20px;
+    margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  }
+  h2 { margin-top: 0; font-size: 18px; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 18px; font-size: 15px; cursor: pointer;
+  }
+  button:disabled { background: #b9c4d4; cursor: default; }
+  button.secondary { background: #e8ebf0; color: #333; }
+  #status { color: #555; }
+  #progress { margin-top: 12px; color: #555; font-size: 14px; }
+  .demo { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  canvas#draw {
+    background: #000; border: 1px solid #ccc; border-radius: 8px;
+    touch-action: none; cursor: crosshair;
+  }
+  #prediction { font-size: 20px; min-height: 28px; }
+  .bars { display: flex; gap: 6px; margin-top: 12px; height: 120px; align-items: flex-end; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; height: 100%; }
+  .bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .2s; }
+  .bar-label { font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧠 Нейросеть для MNIST — прямо в браузере</h1>
+
+  <div class="card">
+    <h2>1. Обучение</h2>
+    <p id="status">Нажмите «Обучить» — загрузится датасет MNIST (около 10 МБ), модель обучится за пару минут прямо здесь.</p>
+    <button id="trainBtn">Обучить</button>
+    <div id="progress"></div>
+  </div>
+
+  <div class="card">
+    <h2>2. Проверка: нарисуйте цифру</h2>
+    <div class="demo">
+      <canvas id="draw" width="280" height="280"></canvas>
+      <div>
+        <div id="prediction">—</div>
+        <div class="bars" id="bars"></div>
+        <button class="secondary" id="clearBtn" style="margin-top:12px;">Стереть</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const IMAGE_SIZE = 784;   // 28 x 28
+const NUM_CLASSES = 10;
+const NUM_IMAGES = 65000;
+const TRAIN_SIZE = 55000;
+const TEST_SIZE = 10000;
+const SPRITE = 'https://storage.googleapis.com/learnjs-data/model-builder/mnist_images.png';
+const LABELS = 'https://storage.googleapis.com/learnjs-data/model-builder/mnist_labels_uint8';
+const STORAGE_KEY = 'mnist-perceptron';
+
+const statusEl = document.getElementById('status');
+const progressEl = document.getElementById('progress');
+const trainBtn = document.getElementById('trainBtn');
+const drawCanvas = document.getElementById('draw');
+const ctx = drawCanvas.getContext('2d');
+let model = null;
+
+// ----- Модель: та же архитектура, что в main.py (784 -> 128 -> 64 -> 10) -----
+function buildModel() {
+  const m = tf.sequential();
+  m.add(tf.layers.dense({ inputShape: [IMAGE_SIZE], units: 128, activation: 'relu' }));
+  m.add(tf.layers.dense({ units: 64, activation: 'relu' }));
+  m.add(tf.layers.dense({ units: NUM_CLASSES, activation: 'softmax' }));
+  m.compile({
+    optimizer: tf.train.adam(0.001),
+    loss: 'categoricalCrossentropy',
+    metrics: ['accuracy'],
+  });
+  return m;
+}
+
+// ----- Данные: спрайт 784 x 65000, каждая строка — одна картинка -----
+async function loadData() {
+  statusEl.textContent = 'Загружаю датасет MNIST (около 10 МБ)...';
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  const imgLoaded = new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('Не удалось загрузить датасет. Проверьте интернет.'));
+  });
+  img.src = SPRITE;
+  const labelsRes = fetch(LABELS);
+  await imgLoaded;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const c = canvas.getContext('2d');
+  c.drawImage(img, 0, 0);
+  const pixels = c.getImageData(0, 0, canvas.width, canvas.height).data;
+
+  const images = new Float32Array(NUM_IMAGES * IMAGE_SIZE);
+  for (let i = 0; i < NUM_IMAGES * IMAGE_SIZE; i++) {
+    images[i] = pixels[i * 4] / 255;  // берем красный канал, нормализуем в 0..1
+  }
+  const labels = new Uint8Array(await (await labelsRes).arrayBuffer());
+  return { images, labels };
+}
+
+// ----- Обучение -----
+trainBtn.addEventListener('click', async () => {
+  trainBtn.disabled = true;
+  progressEl.textContent = '';
+  try {
+    const { images, labels } = await loadData();
+    statusEl.textContent = 'Готовлю данные...';
+
+    const xsTrain = tf.tensor2d(images.subarray(0, TRAIN_SIZE * IMAGE_SIZE), [TRAIN_SIZE, IMAGE_SIZE]);
+    const ysTrain = tf.tensor2d(labels.subarray(0, TRAIN_SIZE * NUM_CLASSES), [TRAIN_SIZE, NUM_CLASSES]);
+    const xsTest  = tf.tensor2d(images.subarray(TRAIN_SIZE * IMAGE_SIZE), [TEST_SIZE, IMAGE_SIZE]);
+    const ysTest  = tf.tensor2d(labels.subarray(TRAIN_SIZE * NUM_CLASSES), [TEST_SIZE, NUM_CLASSES]);
+
+    model = buildModel();
+    statusEl.textContent = 'Обучаю... страница может подвисать, это нормально.';
+
+    await model.fit(xsTrain, ysTrain, {
+      epochs: 5,
+      batchSize: 64,
+      validationSplit: 0.1,
+      callbacks: {
+        onEpochEnd: (epoch, logs) => {
+          progressEl.textContent =
+            `Эпоха ${epoch + 1}/5 — loss: ${logs.loss.toFixed(4)}, точность: ${(logs.acc * 100).toFixed(1)}%`;
+        },
+      },
+    });
+
+    const evalResult = model.evaluate(xsTest, ysTest);
+    const acc = await evalResult[1].data();
+    statusEl.textContent = `Готово! Точность на тесте: ${(acc[0] * 100).toFixed(1)}%. Рисуйте цифру ниже.`;
+
+    await model.save(`localstorage://${STORAGE_KEY}`);
+    tf.dispose([xsTrain, ysTrain, xsTest, ysTest]);
+  } catch (err) {
+    statusEl.textContent = 'Ошибка: ' + err.message;
+  } finally {
+    trainBtn.disabled = false;
+    trainBtn.textContent = 'Обучить заново';
+  }
+});
+
+// ----- Панель вероятностей -----
+const barsEl = document.getElementById('bars');
+const barEls = [];
+for (let d = 0; d < NUM_CLASSES; d++) {
+  const col = document.createElement('div');
+  col.className = 'bar-col';
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  bar.style.height = '0%';
+  const label = document.createElement('div');
+  label.className = 'bar-label';
+  label.textContent = d;
+  col.appendChild(bar);
+  col.appendChild(label);
+  barsEl.appendChild(col);
+  barEls.push(bar);
+}
+
+// ----- Холст для рисования -----
+function clearCanvas() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, 280, 280);
+}
+clearCanvas();
+ctx.strokeStyle = '#fff';
+ctx.lineWidth = 20;
+ctx.lineCap = 'round';
+ctx.lineJoin = 'round';
+
+let drawing = false;
+function pos(e) {
+  const r = drawCanvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * 280 / r.width,
+    y: (e.clientY - r.top) * 280 / r.height,
+  };
+}
+drawCanvas.addEventListener('pointerdown', (e) => {
+  drawing = true;
+  drawCanvas.setPointerCapture(e.pointerId);
+  const p = pos(e);
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  ctx.lineTo(p.x + 0.1, p.y);
+  ctx.stroke();
+});
+drawCanvas.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  const p = pos(e);
+  ctx.lineTo(p.x, p.y);
+  ctx.stroke();
+});
+window.addEventListener('pointerup', () => {
+  if (drawing) {
+    drawing = false;
+    predictFromCanvas();
+  }
+});
+document.getElementById('clearBtn').addEventListener('click', () => {
+  clearCanvas();
+  document.getElementById('prediction').textContent = '—';
+  barEls.forEach(b => b.style.height = '0%');
+});
+
+// ----- Предобработка: обрезаем и центрируем цифру в поле 28x28 -----
+function preprocess(input) {
+  let minX = 28, minY = 28, maxX = -1, maxY = -1;
+  for (let y = 0; y < 28; y++) {
+    for (let x = 0; x < 28; x++) {
+      if (input[y * 28 + x] > 0.1) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return input;
+  const w = maxX - minX + 1;
+  const h = maxY - minY + 1;
+  const scale = 20 / Math.max(w, h);  // цифра MNIST вписана в квадрат 20x20
+  const out = new Float32Array(IMAGE_SIZE);
+  const offX = (28 - w * scale) / 2;
+  const offY = (28 - h * scale) / 2;
+  for (let y = 0; y < 28; y++) {
+    for (let x = 0; x < 28; x++) {
+      const sx = Math.floor((x - offX) / scale) + minX;
+      const sy = Math.floor((y - offY) / scale) + minY;
+      if (sx >= 0 && sx < 28 && sy >= 0 && sy < 28) {
+        out[y * 28 + x] = input[sy * 28 + sx];
+      }
+    }
+  }
+  return out;
+}
+
+// ----- Предсказание -----
+async function predictFromCanvas() {
+  if (!model) {
+    document.getElementById('prediction').textContent = 'Сначала обучите модель';
+    return;
+  }
+  const small = document.createElement('canvas');
+  small.width = 28;
+  small.height = 28;
+  small.getContext('2d').drawImage(drawCanvas, 0, 0, 28, 28);
+  const data = small.getContext('2d').getImageData(0, 0, 28, 28).data;
+  const input = new Float32Array(IMAGE_SIZE);
+  for (let i = 0; i < IMAGE_SIZE; i++) {
+    input[i] = data[i * 4] / 255;
+  }
+  const tensor = tf.tensor2d([Array.from(preprocess(input))], [1, IMAGE_SIZE]);
+  const probsTensor = model.predict(tensor);
+  const probs = await probsTensor.data();
+  tensor.dispose();
+  probsTensor.dispose();
+
+  let best = 0;
+  for (let d = 0; d < NUM_CLASSES; d++) {
+    if (probs[d] > probs[best]) best = d;
+    barEls[d].style.height = Math.round(probs[d] * 100) + '%';
+  }
+  document.getElementById('prediction').textContent =
+    `Предсказано: ${best} (уверенность ${(probs[best] * 100).toFixed(0)}%)`;
+}
+
+// ----- При загрузке пробуем найти сохранённую модель -----
+(async () => {
+  try {
+    model = await tf.loadLayersModel(`localstorage://${STORAGE_KEY}`);
+    statusEl.textContent = 'Найдена сохранённая модель — можно сразу рисовать. Кнопка «Обучить» переобучит её заново.';
+  } catch (e) {
+    /* модели ещё нет — ждем первого обучения */
+  }
+})();
+</script>
+</body>
+</html>
